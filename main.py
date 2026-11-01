@@ -1,101 +1,66 @@
+import numpy as np
+
 from config import ANCHORS, target, walls
 from simulator import simulate_rssi
 from geometry import count_walls
 from localization import rssi_to_distance_wall_aware
-from multilateration import estimate_position, position_error, estimate_position_weighted
-import numpy as np
+from multilateration import (estimate_position,estimate_position_weighted,position_error)
+from fingerprinting import generate_grid, generate_fingerprints
+from knn_local import predict_position_knn
 
-
-n_samples = 15
 n_runs = 30
+n_samples = 15
 
-single_sample_errors = []
-mean_rssi_errors = []
-weighted_errors = []
+errors = {
+    "single": [],
+    "mean": [],
+    "weighted": [],
+    "knn": []
+}
+
+# Generate fingerprint database once
+grid = generate_grid(30, 20, 2)
+fingerprints = generate_fingerprints(grid, ANCHORS, walls, n_samples=15)
 
 for run in range(n_runs):
-    rssi_samples = {}
+    samples_by_anchor = {}
     mean_rssi = {}
-    variance_rssi = {}
-
-    # Collect multiple noisy RSSI samples for each anchor
-    for name, anchor in ANCHORS.items():
-        samples = []
-
-        for i in range(n_samples):
-            rssi = simulate_rssi(anchor, target, walls)
-            samples.append(rssi)
-
-        rssi_samples[name] = samples
-        mean_rssi[name] = np.mean(samples)
-        variance_rssi[name] = np.var(samples)
-
-
     weights = {}
 
-    for name in ANCHORS:
-        weights[name] = 1 / variance_rssi[name]
+    for name, anchor in ANCHORS.items():
+        samples = [
+            simulate_rssi(anchor, target, walls)
+            for _ in range(n_samples)
+        ]
 
-    # Convert mean RSSI into one wall-aware distance per anchor
-    distances = {}
+        samples_by_anchor[name] = samples
+        mean_rssi[name] = np.mean(samples)
+        weights[name] = 1 / (np.var(samples) + 1e-6)
+
+    single_distances = {}
+    mean_distances = {}
 
     for name, anchor in ANCHORS.items():
         wall_count = count_walls(anchor, target, walls)
-        distances[name] = rssi_to_distance_wall_aware(mean_rssi[name], wall_count)
 
-    # Build distances using only ONE RSSI sample per anchor
-    single_sample_distances = {}
+        single_distances[name] = rssi_to_distance_wall_aware(samples_by_anchor[name][0], wall_count)
 
-    for name, anchor in ANCHORS.items():
-        wall_count = count_walls(anchor, target, walls)
+        mean_distances[name] = rssi_to_distance_wall_aware(mean_rssi[name], wall_count)
 
-        single_rssi = rssi_samples[name][0]
-        single_sample_distances[name] = rssi_to_distance_wall_aware(single_rssi, wall_count)
+    single_position = estimate_position(ANCHORS, single_distances)
+    mean_position = estimate_position(ANCHORS, mean_distances)
 
-    # calling weighted estimator
-    weighted_estimated = estimate_position_weighted(ANCHORS, distances, weights)
-    weighted_error = position_error(target, weighted_estimated)
+    weighted_position = estimate_position_weighted(ANCHORS, mean_distances, weights)
 
-    # Position using mean/filtered RSSI
-    filtered_estimated = estimate_position(ANCHORS, distances)
-    filtered_error = position_error(target, filtered_estimated)
+    knn_position = predict_position_knn(mean_rssi, fingerprints, k=3)
+
+    errors["single"].append(position_error(target, single_position))
+    errors["mean"].append(position_error(target, mean_position))
+    errors["weighted"].append(position_error(target, weighted_position))
+    errors["knn"].append(position_error(target, knn_position))
 
 
-    # Position using only one RSSI reading
-    single_estimated = estimate_position(ANCHORS, single_sample_distances)
-    single_error = position_error(target, single_estimated)
-
-    # Store errors
-    mean_rssi_errors.append(filtered_error)
-    weighted_errors.append(weighted_error)
-    single_sample_errors.append(single_error)
-
-
-#average across all
-average_mean_error = np.mean(mean_rssi_errors)
-average_single_error = np.mean(single_sample_errors)
-average_weighted_error = np.mean(weighted_errors)
-
-print("Average single-sample error:", average_single_error)
-print("Average mean-RSSI error:", average_mean_error)
-print("Average weighted error:", average_weighted_error)
-
-
-
-
-# # Print each anchor
-# for name in ANCHORS:
-#     print(name)
-#     print("Mean RSSI:", mean_rssi[name])
-#     print("RSSI variance:", variance_rssi[name])
-#     print("Estimated distance:", distances[name])
-#     print()
-
-
-# print("Actual position:", target)
-
-# print("\nSingle-sample position:", single_estimated)
-# print("Single-sample error:", single_error)
-
-# print("\nMean-RSSI position:", filtered_estimated)
-# print("Mean-RSSI error:", filtered_error)
+for name, values in errors.items():
+    print(f"\n{name.upper()}")
+    print(f"Average error: {np.mean(values):.3f} m")
+    print(f"Standard deviation: {np.std(values):.3f} m")
